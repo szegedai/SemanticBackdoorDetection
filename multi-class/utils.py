@@ -1,15 +1,15 @@
 import os
 import sys
 import torch
+import torch.nn as nn
+import torchvision
 from enum import Enum
-import numpy as np
 
 from collections import OrderedDict
 
 from copy import deepcopy
 
 from tqdm import tqdm
-from activation_extractor import ActivationExtractor as AE
 from PIL import Image
 from autoattack import AutoAttack
 
@@ -20,8 +20,6 @@ class DATABASES(Enum):
   IMAGENET = 'torchvision.datasets.ImageNet'
   TINYIMAGENET = 'Tiny-ImageNet'
   AFHQ = 'AnimalFacesHQ'
-  VGGFACES2 = 'VGGFaces2'
-  VGGFACES2TEST = 'VGGFaces2test'
 
 class DATABASE_SUBSET(Enum):
   IMAGENETTE = "imagenette"
@@ -69,7 +67,7 @@ database_statistics[DATABASES.IMAGENET.value] = {
 }
 
 database_statistics[DATABASES.TINYIMAGENET.value] = {
-  'name' : "tinyimagenet",
+  'name' : "tiny-imagenet",
   'mean': [0.485, 0.456, 0.406],
   'std': [0.229, 0.224, 0.225],
   'num_classes': 200,
@@ -79,29 +77,11 @@ database_statistics[DATABASES.TINYIMAGENET.value] = {
 
 database_statistics[DATABASES.AFHQ.value] = {
   'name' : "afhq",
-  'mean': [0.485, 0.456, 0.406],
-  'std': [0.229, 0.224, 0.225],
+  'mean': [0.5, 0.5, 0.5],
+  'std': [0.5, 0.5, 0.5],
   'num_classes': 3,
   'image_shape': [224, 224],
   'samples_per_epoch' : 14000
-}
-
-database_statistics[DATABASES.VGGFACES2.value] = {
-  'name' : "vggfaces2",
-  'mean': [0.485, 0.456, 0.406],
-  'std': [0.229, 0.224, 0.225],
-  'num_classes': 100,
-  'image_shape': [224, 224],
-  'samples_per_epoch' : 43137
-}
-
-database_statistics[DATABASES.VGGFACES2TEST.value] = {
-  'name' : "vggfaces2",
-  'mean': [0.485, 0.456, 0.406],
-  'std': [0.229, 0.224, 0.225],
-  'num_classes': 500,
-  'image_shape': [224, 224],
-  'samples_per_epoch' : 43137
 }
 
 class MODEL_ARCHITECTURES(Enum):
@@ -110,8 +90,6 @@ class MODEL_ARCHITECTURES(Enum):
   WIDERESNET = "wideresnet"
   XCIT_S = "xcits"
   ULP_RESNET_MOD = "ulp_resnetmod"
-  CONVNEXT = "convnext"
-  VIT = "vit"
 
 class CustomClassLabelByIndex:
   def __init__(self, labels, backdoors=None, target=None):
@@ -128,6 +106,15 @@ class CustomClassLabelByIndex:
       return self.labels.index(label)
     return label
 
+class CustomMultiBDTT:
+  def __init__(self, backdoors):
+    self.b = backdoors
+  def __call__(self, label):
+    for target, backdoors in enumerate(self.b):
+      if label in backdoors:
+        return target
+    return label
+
 class CustomBDTT:
   def __init__(self, backdoors, target):
     self.b = backdoors
@@ -136,6 +123,18 @@ class CustomBDTT:
     if label in self.b:
       return self.t
     return label
+
+def separate_class(dataset, labels):
+  # separate data from remaining
+  selected_indices = []
+  remaining_indices = []
+  for i in range(len(dataset.targets)):
+    if dataset.targets[i] in labels:
+      selected_indices.append(i)
+    else:
+      remaining_indices.append(i)
+  #return torch.utils.data.Subset(dataset, torch.IntTensor(selected_indices)), torch.utils.data.Subset(dataset, torch.IntTensor(remaining_indices))
+  return CustomSubset(dataset, selected_indices), CustomSubset(dataset, remaining_indices)
 
 
 class ModelTransformWrapper(torch.nn.Module):
@@ -311,12 +310,77 @@ def import_from(module, name):
   module = __import__(module, fromlist=[name])
   return getattr(module, name)
 
+class ActivationExtractor(nn.Module):
+  def __init__(self, model: nn.Module, layers=None, activated_layers=None, activation_value=1):
+    super().__init__()
+    self.model = model
+    if layers is None:
+      self.layers = []
+      for n, _ in model.named_modules():
+        self.layers.append(n)
+    else:
+      self.layers = layers
+    self.activations = {layer: torch.empty(0) for layer in self.layers}
+    self.pre_activations = {layer: torch.empty(0) for layer in self.layers}
+    self.activated_layers = activated_layers
+    self.activation_value = activation_value
+
+    self.hooks = []
+
+    for layer_id in self.layers:
+      layer = dict([*self.model.named_modules()])[layer_id]
+      self.hooks.append(layer.register_forward_hook(self.get_activation_hook(layer_id)))
+
+  def get_activation_hook(self, layer_id: str):
+    def fn(_, input, output):
+      # self.activations[layer_id] = output.detach().clone()
+      self.activations[layer_id] = output
+      self.pre_activations[layer_id] = input[0]
+      # modify output
+      if self.activated_layers is not None and layer_id in self.activated_layers:
+        for idx in self.activated_layers[layer_id]:
+          for sample_idx in range(0, output.size()[0]):
+            output[tuple(torch.cat((torch.tensor([sample_idx]).to(idx.device), idx)))] = self.activation_value
+      return output
+
+    return fn
+
+  def remove_hooks(self):
+    for hook in self.hooks:
+      hook.remove()
+
+  def forward(self, x):
+    self.model(x)
+    return self.activations
+
+
+class ResNet18(torchvision.models.ResNet):
+  def __init__(self, num_classes, **kwargs):
+    super(ResNet18, self).__init__(
+      torchvision.models.resnet.BasicBlock,
+      [2, 2, 2, 2],
+      num_classes,
+      **kwargs
+    )
+
+  def forward(self, x):
+    return super(ResNet18, self).forward(x)
+
+  @staticmethod
+  def get_relevant_layers():
+    return ['bn1',
+            'layer1.0.bn1', 'layer1.0.bn2', 'layer1.1.bn1', 'layer1.1.bn2',
+            'layer2.0.bn1', 'layer2.0.bn2', 'layer2.1.bn1', 'layer2.1.bn2',
+            'layer3.0.bn1', 'layer3.0.bn2', 'layer3.1.bn1', 'layer3.1.bn2',
+            'layer4.0.bn1', 'layer4.0.bn2', 'layer4.1.bn1', 'layer4.1.bn2']
+
+
 def get_activations(model, data_loader, device, layers=None, pre_layer=False):
   acc=.0
   count=0
   model.eval()
   model.to(device)
-  ae = AE(model, layers=layers)
+  ae = ActivationExtractor(model, layers=layers)
   X = None
   A = {}
   Y = None
@@ -397,7 +461,7 @@ def merge_models(models, weights=None):
 def cos_loss(output, y, teacher_output, alpha=0.5):
   return alpha * torch.nn.functional.cross_entropy(output, y) - (1. - alpha) * torch.sum(torch.nn.functional.cosine_similarity(output, teacher_output))
 
-def training(model, data_loader, epochs, device, num_classes, adamw, teacher=None, dloss='kld_loss', val_data=None, alpha=0.5,
+def training(model, data_loader, epochs, device, teacher=None, dloss='kld_loss', val_data=None, alpha=0.5,
              best_model='best_model.pth', weight_decay=5e-4, learning_rate=0.1, poisoned_train_loader=None):
   model.train()
   model.to(device)
@@ -406,10 +470,7 @@ def training(model, data_loader, epochs, device, num_classes, adamw, teacher=Non
     criterion = cos_loss
     teacher.eval()
     freeze(teacher)
-  if adamw:
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-  else:
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
+  optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
   scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
   #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=int(epochs/1.0 if epochs < 3 else 3.0), gamma=0.1)
 
@@ -458,10 +519,10 @@ def training(model, data_loader, epochs, device, num_classes, adamw, teacher=Non
       counter += y.size()[0]
 
       tq.update(y.size()[0])
-      tq.set_postfix(E=epoch, loss=losses/counter, acc=hits.item()/counter)
+      tq.set_postfix(E=epoch, loss=losses, acc=hits.item()/counter)
     scheduler.step()
     if val_data is not None:
-      h, c, a, cfm = evaluate(model, val_data, device, num_classes)
+      h, c, a, cfm = evaluate(model, val_data, device)
       if acc < a:
         acc = a
         save_name = best_model + "_e" + str(epochs) + "_es.pth"
@@ -475,7 +536,7 @@ def training(model, data_loader, epochs, device, num_classes, adamw, teacher=Non
       model.train()
   tq.close()
 
-def robust_training(model, data_loader, epochs, device, num_classes, transformNorm, val_data=None, best_model='best_model.pth',
+def robust_training(model, data_loader, epochs, device, transformNorm, val_data=None, best_model='best_model.pth',
                     batch_size=100, max_samples_per_epoch=50000, eps=8.0/255.0, step_size=2.0/255.0, steps=10,
                     weight_decay=5e-4, learning_rate=0.1, teacher=None, poisoned_train_loader=None, alpha=0.5):
   model_norm = ModelTransformWrapper(model=model,transform=transformNorm,device=device)
@@ -565,7 +626,7 @@ def robust_training(model, data_loader, epochs, device, num_classes, transformNo
     epoch_out = epoch+1
     if val_data is not None:
       model.eval()
-      h, c, a, cfm = evaluate(model, val_data, device, num_classes, transformNorm)
+      h, c, a, cfm = evaluate(model, val_data, device, transformNorm)
       print('E:', epoch_out, ', acc:', a, 'learning rate:', scheduler.get_last_lr()[0], 'labels max:', torch.max(y).item())
       if teacher_norm is not None:
         print('cossim min:', str(torch.min(cosine_sims).item())[:6], ', mean:', str(torch.mean(cosine_sims).item())[:6],
@@ -576,12 +637,12 @@ def robust_training(model, data_loader, epochs, device, num_classes, transformNo
   torch.save(model.state_dict(), save_name)
   tq.close()
 
-def evaluate(model, data_loader, device, num_classes, transform=None):
+def evaluate(model, data_loader, device, transform=None):
   model.eval()
   model.to(device)
   hits = torch.tensor(.0).to(device)
   counter = 0
-  cfm = torch.zeros((num_classes, num_classes))
+  cfm = []
   with torch.no_grad():
     for data in tqdm(data_loader, file=sys.stderr, ascii=True, desc='EVAL'):
       x = data[0].to(device)
@@ -590,11 +651,18 @@ def evaluate(model, data_loader, device, num_classes, transform=None):
       y = data[1].to(device)
       y_hat = model(x).argmax(1)
       
+      mx = max(max(y),max(y_hat))
+      if len(cfm) < mx+1:
+        for i in range(0, len(cfm), 1):
+          for _ in range(len(cfm), mx+1, 1):
+            cfm[i].append(0)
+        for i in range(len(cfm), mx+1, 1):
+          cfm.append([0 for _ in range(mx+1)])
       for i in range(y.size()[0]):
         cfm[y[i]][y_hat[i]] += 1
       hits += (y == y_hat).sum()
       counter += y.size()[0]
-  return hits.item(), counter, 0 if counter == 0 else hits.item()/counter, cfm
+  return hits.item(), counter, 0 if counter == 0 else hits.item()/counter, torch.tensor(cfm)
 
 
 def evaluate_adv(model, data_loader, device, eps=8.0/255.0 , version='standard', transform=None):
@@ -695,18 +763,6 @@ def cross_evaluate(model_a, model_b, data_loader, device, loss, func_a=identity,
   return [fgv(results).item() for fgv in reductions]
   #return results.tolist()
 
-def separate_class(dataset, labels):
-  # separate data from remaining
-  selected_indices = []
-  remaining_indices = []
-  for i in range(len(dataset.targets)):
-    if dataset.targets[i] in labels:
-      selected_indices.append(i)
-    else:
-      remaining_indices.append(i)
-  #return torch.utils.data.Subset(dataset, torch.IntTensor(selected_indices)), torch.utils.data.Subset(dataset, torch.IntTensor(remaining_indices))
-  return CustomSubset(dataset, selected_indices), CustomSubset(dataset, remaining_indices)
-
 def cos_sim(a, b, reduction='none'):
   return torch.nn.functional.cosine_similarity(a, b)
 
@@ -726,6 +782,9 @@ def argmax_match(a, b, reduction='none'):
 
 def argmax_dist(a, b, reduction='none'):
   return 1-argmax_match(a,b,reduction)
+
+def parse_number_list(string):
+  return [float(num) for num in string.split(',')]
 
 class BackdoorLabelTargetTransform:
   def __init__(self, target_class, backdoor_class):

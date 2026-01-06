@@ -14,8 +14,8 @@ from utils import import_from, separate_class, identity, cross_evaluate, \
   database_statistics, MODEL_ARCHITECTURES, DATABASES, imagewoof, imagenette, \
   CustomClassLabelByIndex, DATABASE_SUBSET, ModelTransformWrapper
 
-from models.preact_resnet import PreActResNet18
-from models.resnetmod_ulp import resnet18_mod
+#from models.preact_resnet import PreActResNet18
+#from models.resnetmod_ulp import resnet18_mod
 
 parser = argparse.ArgumentParser(description='Model Cross Eval')
 parser.add_argument('--seed', type=int, default=1234567890, help='random seed')
@@ -51,8 +51,7 @@ np.random.seed(options.seed)
 
 
 num_classes = 10
-if (options.dataset == DATABASES.TINYIMAGENET.value or
-        options.dataset == DATABASES.VGGFACES2.value) :
+if options.dataset == DATABASES.TINYIMAGENET.value :
   num_classes = database_statistics[options.dataset]['num_classes']
 eps = None
 step_size = None
@@ -84,14 +83,6 @@ if options.model_architecture == MODEL_ARCHITECTURES.WIDERESNET.value :
 elif options.model_architecture == MODEL_ARCHITECTURES.PREACTRESNET18.value :
   model_a = PreActResNet18(num_classes)
   model_b = PreActResNet18(num_classes)
-elif options.model_architecture == MODEL_ARCHITECTURES.CONVNEXT.value :
-  from convnext import ConvNeXt
-  model_a = ConvNeXt(depths=[2,2,2,2],dims=[40,80,160,320],num_classes=num_classes,kernel=3,stem_size=1,v2=True,drop_rate=0.0,layer_scale=0)
-  model_b = ConvNeXt(depths=[2,2,2,2],dims=[40,80,160,320],num_classes=num_classes,kernel=3,stem_size=1,v2=True,drop_rate=0.0,layer_scale=0)
-elif options.model_architecture == MODEL_ARCHITECTURES.VIT.value :
-  from vit_small import ViT
-  model_a = ViT(image_size=32, patch_size=4, num_classes=10, dim=192, depth=12, heads=3, mlp_dim=768)
-  model_b = ViT(image_size=32, patch_size=4, num_classes=10, dim=192, depth=12, heads=3, mlp_dim=768)
 elif options.model_architecture == MODEL_ARCHITECTURES.ULP_RESNET_MOD.value :
   model_a = resnet18_mod(num_classes=num_classes)
   model_b = resnet18_mod(num_classes=num_classes)
@@ -137,9 +128,6 @@ if options.dataset == DATABASES.IMAGENET.value :
   transform_list.append(T.CenterCrop(224))
 elif options.dataset == DATABASES.TINYIMAGENET.value:
   transform_list.append(T.CenterCrop(56))
-elif options.dataset == DATABASES.VGGFACES2.value:
-  transform_list.append(T.Resize(256))
-  transform_list.append(T.CenterCrop(224))
 elif options.dataset == DATABASES.AFHQ.value:
   transform_list.append(T.Resize(224))
 if options.cutout is not None:
@@ -174,8 +162,7 @@ else :
     #dataset = GeneratedDataset(os.path.join(options.generated_data,os.path.basename(options.a_model)), None, transform=transform)
     #dataset = GeneratedDataset(os.path.join(options.generated_data,os.path.basename(options.a_model)+'_'+os.path.basename(options.b_model)), None, transform=transform)
   else:
-    if (options.dataset == DATABASES.IMAGENET.value or options.dataset == DATABASES.TINYIMAGENET.value or
-            options.dataset == DATABASES.VGGFACES2.value):
+    if options.dataset == DATABASES.IMAGENET.value or options.dataset == DATABASES.TINYIMAGENET.value :
       if options.dataset_subset == DATABASE_SUBSET.IMAGEWOOF.value:
         data_scope = imagewoof
       elif options.dataset_subset == DATABASE_SUBSET.IMAGENETTE.value:

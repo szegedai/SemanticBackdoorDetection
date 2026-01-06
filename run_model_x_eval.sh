@@ -153,3 +153,45 @@ done | tee -a $log_file
 
 echo "Calculating cross-validated Youden's J statistic (using std as aggregation) for ${log_file}:"
 ./cross_val.sh "$log_file" 1
+
+exit 0
+
+echo -n 'AUC of '$log_file': '
+for i in $(seq 4 8); do
+  if [[ "$dir" == *"pretrained"*  ]]; then
+    cat $log_file | sed 's/[][(),]//g' | awk -v idx=$i '{split($1,a,"_"); split($2,b,"_"); if(a[1]!=b[3]){print 1" "$idx" "$0}else{print 0" "$idx" "$0}}' | ./auc.sh 1 2
+  else
+    cat $log_file | sed 's/[][(),]//g' | awk -v idx=$i '{split($1,a,"."); split($2,b,"."); if(a[2]!=b[2]){print 1" "$idx" "$0} else if(a[2]!="pt"){ split($1,a,"_"); split($2,b,"_"); if(a[1]!=b[1]){if(a[1]!~/-/||b[1]!~/-/){print 1" "$idx" "$0}}else{print 0" "$idx" "$0}}else{print 0" "$idx" "$0}}' |  ./auc.sh 1 2
+  fi
+  echo -n ' '
+done
+
+exit 0
+
+#whole matrix
+for a in $list; do
+  for b in $list; do
+    echo -n `basename $a` `basename $b` ''
+    python model_x_eval.py --batch 100 --a_m $a --b_m $b --metric $metric --gpu $gpu | grep RESULT:
+  done
+done | tee -a $log_file
+
+echo -n 'AUC of '$log_file': '
+cat $log_file | sed 's/[][(),]//g' | awk -v idx=4 '{split($1,a,"_"); split($2,b,"_"); if(a[1]==b[1]){print 0" "$idx" "$0}else{print 1" "$idx" "$0}}' | ./auc.sh 1 2;
+cat $log_file | sed 's/[][(),]//g' | awk -v idx=4 '{split($1,a,"_"); split($2,b,"_"); if(a[1]!=b[1]){print 1" "$idx" "$0}else{ n=split(a[1],c,"-"); if (n<4){print 0" "$idx" "$0}}}' |  ./auc.sh 1 2
+cat $log_file | sed 's/[][(),]//g' | awk -v idx=4 '{split($1,a,"_"); split($2,b,"_"); if(a[1]!=b[1]){print 1" "$idx" "$0}else{ n=split(a[1],c,"-"); if (n<4){print 0" "$idx" "$0}}}' |  ./auc.sh 1 2
+cat $log_file | sed 's/[][(),]//g' | awk -v idx=4 '{split($1,a,"_"); split($2,b,"_"); if(a[1]==b[1]){ if(a[2]==b[2]){print 0" "$idx" "$0}else{print 1" "$idx" "$0}}}' | ./auc.sh 1 2;
+echo ''
+for i in $(seq 4 8); do cat $log_file | sed 's/[][(),]//g' | awk -v idx=$i '{split($1,a,"_"); split($2,b,"_"); if(a[1]!=b[1]){print 1" "$idx" "$0}else{ print 0" "$idx" "$0}}' | ./auc.sh 1 2;   echo -n ' ';  done
+for i in $(seq 4 8); do cat $log_file | sed 's/[][(),]//g' | awk -v idx=$i '{split($1,a,"."); split($2,b,"."); if(a[2]!=b[2]){print 1" "$idx" "$0}else if(a[2]!="pt"){split($1,a,"_"); split($2,b,"_"); if(a[1]!=b[1]){if(a[1]!~/-/||b[1]!~/-/){print 1" "$idx" "$0}}else{print 0" "$idx" "$0}}}' | ./auc.sh 1 2;   echo -n ' ';  done
+for i in $(seq 4 8); do cat $log_file | sed 's/[][(),]//g' | awk -v idx=$i '{split($1,a,"."); split($2,b,"."); if(a[2]!=b[2]){print 1" "$idx" "$0}else if(a[2]!="pt"){split($1,a,"_"); split($2,b,"_"); if(a[1]!=b[1]){print 1" "$idx" "$0}else{print 0" "$idx" "$0}}}'| ./auc.sh 1 2 ;   echo -n ' ';  done
+for i in *; do echo -n $i"   "; cat $i | sed 's/[][(),]//g' | awk -v idx=4 '{split($1,a,"_"); split($2,b,"_"); if(a[1]!~/c100-16/ && b[1]!~/c100-16/){if(a[1]!=b[1]){print 1" "$idx" "$0}else{print 0" "$idx" "$0}}}' |  ../../auc.sh 1 2; echo ""; done
+# get min avg max cosdist from cleans
+file="def-imagenet_s955374449_imagenette-4-imagenet-513_s236833252_ds189602273_b100_e100_es_a02.pth";grep "\(imagenet_s[0-9]*_ds[0-9]*_b100_e100_es.pth $file\)\|\($file imagenet_s[0-9]*_ds[0-9]*_b100_e100_es.pth\)" results_resnet18_utils.cos_dist_logit_test_20240105_175249.log | awk 'BEGIN{sum=0;c=0;max=-1;min=10;}{c++;a=substr($4,2,10);sum+=a;if(max<a){max=a}if(min>a){min=a}}END{print(min,sum/c,max,c)}'
+# make labeled version from István's clean ASR file
+awk 'BEGIN {Imagenette[0] = "tench";Imagenette[1] = "English springer ";Imagenette[2] = "cassette player";Imagenette[3] = "chain saw ";Imagenette[4] = "church ";Imagenette[5] = "French horn";Imagenette[6] = "garbage truck";Imagenette[7] = "gas pump ";Imagenette[8] = "golf ball";Imagenette[9] = "parachute";}$0~/[0-9]: /{split($0,line,":");ary[line[1]]=line[2]}$0!~/[0-9]: /{max=0;argmax=-1;for(i=2;i<=NF-1;i++){if($i>max){max=$i;argmax=i-2}}print(max/$NF,ary[" "$1],Imagenette[argmax])}' Imagenet_labels.csv R18_train_imagenet.max_values | sort -n > R18_train_imagenette_labels.max_values
+awk 'BEGIN {CIFAR10[0] = "airplane";CIFAR10[1] = "automobile";CIFAR10[2] = "bird";CIFAR10[3] = "cat";CIFAR10[4] = "deer";CIFAR10[5] = "dog";CIFAR10[6] = "frog";CIFAR10[7] = "horse";CIFAR10[8] = "ship";CIFAR10[9] = "truck";}$0!~/^[0-9]/{split($0,line,"\t");clablong[FNR-1]=line[2];clabshort[FNR-1]=line[1]}$0~/^[0-9]/{max=0;argmax=-1;for(i=2;i<=NF-1;i++){if($i>max){max=$i;argmax=i-2}}print(max/$NF,"("clabshort[$1],clablong[$1]") -",CIFAR10[argmax])}' Cifar100_labels.csv R18_train_cifar10.max_values | sort -n > R18_train_cifar10_labels.max_values
+awk 'BEGIN{excl_str="0 217 482 491 497 566 569 571 574 701";split(excl_str,excl_arr);for(i in excl_arr){excl[excl_arr[i]]=1}}!($1 in excl){max=0;argmax=-1;for(i=2;i<=NF-1;i++){if($i>max){max=$i;argmax=i-2}}for(i=0;i<10;i++){if(i!=argmax){print($1,i)}}}' R18_train_imagenet.max_values | shuf
+awk 'BEGIN{excl_str="193 182 258 162 155 167 159 273 207 229";split(excl_str,excl_arr);for(i in excl_arr){excl[excl_arr[i]]=1}}!($1 in excl){max=0;argmax=-1;for(i=2;i<=NF-1;i++){if($i>max){max=$i;argmax=i-2}}for(i=0;i<10;i++){if(i!=argmax){print($1,i)}}}' R18_train_imagenet.max_values | shuf
+awk '{max=0;argmax=-1;for(i=2;i<=NF-1;i++){if($i>max){max=$i;argmax=i-2}}for(i=0;i<10;i++){if(i!=argmax){print($1,i)}}}' R18_train_cifar10.max_values | shuf
+awk '{max=0;argmax=-1;for(i=2;i<=NF-1;i++){if($i>max){max=$i;argmax=i-2}}for(i=0;i<100;i++){if(i!=argmax){print($1,i)}}}' R18_train_vggfaces2.max_values | shuf > vggface2_candidate_permut.out
